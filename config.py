@@ -1,60 +1,37 @@
-EMBEDDING_SIZE = 300
+CORPUS_PATH = './corpus/ted-talks-corpus/'
 
-ANN_MODEL_SAMPLE_CONFIG = {
-    'layers' : [
-        {
-            'in' : EMBEDDING_SIZE*5,
-            'out' : 300
-        },
-        {
-            'in' : 300,
-            'out' : 35415
-        }
-    ],
-    'activations' : [
-        'relu',
-    ]
+SPECIAL_TOKENS = {
+    'padToken' : '<pad>',
+    'startToken' : '<start>',
+    'endToken' : '<end>'
 }
 
-
-LSTM_MODEL_SAMPLE_CONFIG = {
-    'input_size' : EMBEDDING_SIZE,
-    'hidden_size' : EMBEDDING_SIZE*2,
-    'num_layers' : 1,
-    'proj_size' : EMBEDDING_SIZE*2,
-    'linear_layers' : [
-        {
-            'in' : EMBEDDING_SIZE*2,
-            'out' : 35415
-        }
-    ],
-    'activations' : [
-    ]
+ENCODER_CONFIG = {
+    'inputDim' : 512,
+    'numHeads' : 8,
+    'dropout'  : 0.1,
+    'mlp_scaler' : 2,
+    'outputDim' : 512,
 }
 
-DECODER_BLOCK_CONFIG = {
-    'embedDim' : EMBEDDING_SIZE,
-    'numHeads' : 6,
-    'dropout' : 0.1,
-    'batch_first' : True,
-    'mlp_scaler' : 3,
+DECODER_CONFIG = {
+    'inputDim' : 512,
+    'numHeads' : 8,
+    'dropout'  : 0.1,
+    'mlp_scaler' : 2,
+    'outputDim' : 512,
 }
 
-TRANSFORMER_CONFIG = {
-    'embedDim' : EMBEDDING_SIZE,
-    'vocabSize' : 35415,
-    'padToken' : 0,
-    'numLayers' : 3,
-    'blockConfig' : [
-        DECODER_BLOCK_CONFIG,
-        DECODER_BLOCK_CONFIG,
-        DECODER_BLOCK_CONFIG
-    ]
-}
-
-
-TRAINER_SAMPLE_CONFIG = {
-    'optimizer' : 'Adam',
-    'epochs' : 10,
-    'learning_rate' : 5e-6
+MODEL_CONFIG = {
+    'num_enc_embeddings' : 27121,
+    'num_dec_embeddings' : 36420,
+    'inputDim' : 512,
+    'outputDim' : 512,
+    'padding_idx' : 0,
+    'numEncoderLayers' : 4,
+    'numDecoderLayers' : 4,
+    'modelOutputDimension' : 512,
+    'outputVocabSize' : 36420,
+    'encoderBlockConfig' : [ENCODER_CONFIG for _ in range(4)],
+    'decoderBlockConfig' : [DECODER_CONFIG for _ in range(4)]
 }

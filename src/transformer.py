@@ -7,55 +7,7 @@ from torch import cat as Concatenate, no_grad as NoGrad
 from math import log
 
 from .model import LanguageModel
-
-
-class DecoderBlock(NeuralNetwork.Module):
-    def __init__(self, config : dict ):
-        super().__init__()
-        self.config = config
-        self.device = 'cuda' if Cuda.is_available() else 'cpu'
-        self.__init_architecture__()
-
-    def __init_architecture__(self):
-        # Layer Normalization for the inputs.
-        self.norm1 = NeuralNetwork.LayerNorm(normalized_shape=self.config['embedDim'], device = self.device)
-        
-        self.maskedMultiHeadAttention = NeuralNetwork.MultiheadAttention(embed_dim     = self.config['embedDim'], 
-                                                                         num_heads     = self.config['numHeads'], 
-                                                                         dropout       = self.config['dropout'], 
-                                                                         batch_first   = True,
-                                                                         device        = self.device)
-
-        # Layer Normalization for the attention output.
-        self.norm2 = NeuralNetwork.LayerNorm(normalized_shape=self.config['embedDim'], device = self.device)
-        
-        # Apply Linear Layer to the attention output, transforming it to the same dimension as the inputs.
-        self.multiLayerPerceptron = NeuralNetwork.Sequential(
-            NeuralNetwork.Linear(self.config['embedDim'], self.config['embedDim'] * self.config['mlp_scaler'], device = self.device),
-            NeuralNetwork.ELU(),
-            NeuralNetwork.Linear(self.config['embedDim'] * self.config['mlp_scaler'], self.config['embedDim'], device = self.device)
-        )
-    
-    @override
-    def forward(self, inputs, input_mask = None ):
-        _, seqLen, _ = inputs.shape
-        
-        # Causal Mask
-        mask = UpperTriangle( Ones( seqLen, seqLen , device = self.device), 1).bool()
-
-        # Normalize the inputs.
-        inputs = self.norm1(input)
-
-        # Self Attention and Skip Connection
-        output = self.maskedMultiHeadAttention(inputs, input, input, attn_mask = mask, key_padding_mask = input_mask)[0] + input
-
-        # Normalize the attention outputr.
-        output = self.norm2(output)
-
-        # Apply MLP
-        output = self.multiLayerPerceptron(output)
-
-        return output
+from .attention import MultiHeadAttention
 
 class SinusoidalPositionalEmbedding(NeuralNetwork.Module):
     def __init__(self, dimension : int, device ):
@@ -72,53 +24,187 @@ class SinusoidalPositionalEmbedding(NeuralNetwork.Module):
         embedding = Concatenate((embedding.sin(), embedding.cos()), dim = -1)
         return embedding
 
-class DecoderOnlyTransformer(LanguageModel):
-    def __init__(self, config : dict):
-        super().__init__(config)
+class DecoderBlock(NeuralNetwork.Module):
+    def __init__(self, config : dict ):
+        super().__init__()
+        self.config = config
+        self.device = 'cuda' if Cuda.is_available() else 'cpu'
         self.__init_architecture__()
-        self.to(device = self.device)
 
     def __init_architecture__(self):
-        # Positional Embeddings to give postitional information to the model.
-        self.positionalEmbeddings = SinusoidalPositionalEmbedding(self.config['embedDim'], self.device)
+        # Masked Attention to Employ Causality during Next token Prediction
+        self.maskedMultiHeadAttention = MultiHeadAttention( inputDim    = self.config['inputDim'], 
+                                                            numHeads    = self.config['numHeads'],
+                                                            dropout     = self.config['dropout'],
+                                                            device      = self.device)
+        
+        # Layer Normalization after the application of Masked Multi-Head Attention
+        self.norm1 = NeuralNetwork.LayerNorm(normalized_shape=self.config['inputDim'], device = self.device)
+        
+        # Cross Attention, with Key, Value from Encoder's last layer.
+        self.crossMultiHeadAttention  = MultiHeadAttention( inputDim    = self.config['inputDim'], 
+                                                            numHeads    = self.config['numHeads'],
+                                                            dropout     = self.config['dropout'],
+                                                            device      = self.device)
+        
+        # Layer Normalization for the attention output.
+        self.norm2 = NeuralNetwork.LayerNorm(normalized_shape=self.config['inputDim'], device = self.device)
+
+        # Apply Linear Layer to the attention output, transforming it to the same dimension as the inputs.
+        self.multiLayerPerceptron = NeuralNetwork.Sequential(
+            NeuralNetwork.Linear(self.config['inputDim'], self.config['inputDim'] * self.config['mlp_scaler'], device = self.device),
+            NeuralNetwork.ELU(),
+            NeuralNetwork.Linear(self.config['inputDim'] * self.config['mlp_scaler'], self.config['outputDim'], device = self.device)
+        )
+
+        # Layer Normalization for the output of the layer.
+        self.norm3 = NeuralNetwork.LayerNorm(normalized_shape = self.config['inputDim'], device = self.device)
+    
+    @override
+    def forward(self, inputs, encoderOutput):
+        _, seqLen, _ = inputs.shape
+        
+        # Causal Mask
+        mask = UpperTriangle( Ones( seqLen, seqLen , device = self.device), 1).bool()
+
+        # Self Attention and Skip Connection
+        outputs = self.maskedMultiHeadAttention(keyRepresentation   = inputs, 
+                                                queryRepresentation = inputs, 
+                                                valueRepresentation = inputs, 
+                                                attn_mask           = mask ) + inputs
+
+        # Normalize the attentions
+        outputs = self.norm1(outputs)
+        
+        # Employ Cross Attention
+        outputs = self.crossMultiHeadAttention(encoderOutput, outputs, encoderOutput) + outputs # Key, Query, Value
+
+        # Normalize the attention output.
+        outputs = self.norm2(outputs)
+
+        # Apply MLP
+        outputs = self.multiLayerPerceptron(outputs) + outputs
+        
+        # Final Layer Normalization
+        outputs = self.norm3(outputs)
+
+        return outputs
+
+class EncoderBlock(NeuralNetwork.Module):
+    def __init__(self, config : dict ):
+        super().__init__()
+        self.config = config
+        self.device = 'cuda' if Cuda.is_available() else 'cpu'
+        self.__init_architecture__()
+
+    def __init_architecture__(self):
+        # No masking is done since the input is visible
+        self.multiHeadAttention = MultiHeadAttention(inputDim    = self.config['inputDim'], 
+                                                     numHeads    = self.config['numHeads'],
+                                                     dropout     = self.config['dropout'],
+                                                     device      = self.device)
+        
+        # Layer Normalizations
+        self.norm1 = NeuralNetwork.LayerNorm(normalized_shape = self.config['inputDim'], device = self.device)
+
+        # Applying Linear Layer to the outputs from the layer normalization of the attention outputs.
+        self.multiLayerPerceptron = NeuralNetwork.Sequential(
+            NeuralNetwork.Linear(self.config['inputDim'], self.config['inputDim'] * self.config['mlp_scaler'], device = self.device),
+            NeuralNetwork.ELU(),
+            NeuralNetwork.Linear(self.config['inputDim'] * self.config['mlp_scaler'], self.config['outputDim'], device = self.device)
+        )
+        
+        # Final Layer Normalization
+        self.norm2 = NeuralNetwork.LayerNorm(normalized_shape = self.config['inputDim'], device = self.device)
+    
+    @override
+    def forward(self, inputs):
+        outputs = self.multiHeadAttention(keyRepresentation = inputs, 
+                                          queryRepresentation = inputs, 
+                                          valueRepresentation = inputs)
+        
+        # Layer Normalization after computing Attention Output
+        outputs = self.norm1(outputs)
+
+        # Pass the outputs through the MLP
+        outputs = self.multiLayerPerceptron(outputs)
+
+        # Final Layer Normalization
+        outputs = self.norm2(outputs)
+
+        return outputs
+
+class EncoderDecoderTransformer(LanguageModel):
+    def __init__(self, modelConfig ):
+        super().__init__(modelConfig)
+        self.__init_architecture__()
+        self.to(self.device)
+
+    def __init_architecture__(self):
+        # Embedding Layers
+        self.EncoderEmbeddings = NeuralNetwork.Embedding(num_embeddings =self.config['num_enc_embeddings'],
+                                                         embedding_dim  =self.config['inputDim'],
+                                                         padding_idx = self.config['padding_idx'] )
+        
+        self.DecoderEmbeddings = NeuralNetwork.Embedding(num_embeddings =self.config['num_dec_embeddings'],
+                                                         embedding_dim  =self.config['outputDim'],
+                                                         padding_idx = self.config['padding_idx'] )
+        
+        # Positional Embeddings
+        self.EncoderPositionalEmbeddings = SinusoidalPositionalEmbedding(self.config['inputDim'], self.device)
+        self.DecoderPositionalEmbeddings = SinusoidalPositionalEmbedding(self.config['outputDim'], self.device)
+
+        # Encoder Stack
+        self.encoderStack = NeuralNetwork.Sequential(
+            *[EncoderBlock(self.config['encoderBlockConfig'][i]) for i in range (self.config['numEncoderLayers']) ]
+        )
 
         # Decoder Stack
         self.decoderStack = NeuralNetwork.ModuleList(
-            [DecoderBlock(self.config['blockConfig'][i]) for i in range(self.config['numLayers'])]
+            [DecoderBlock(self.config['decoderBlockConfig'][i]) for i in range (self.config['numDecoderLayers']) ]
         )
-        
-        # Final MLP for prediction
-        self.finalLayer = NeuralNetwork.Linear(self.config['embedDim'], self.config['vocabSize'], device = self.device)
-    
+
+        self.classificationLayer = NeuralNetwork.Linear(self.config['modelOutputDimension'], self.config['outputVocabSize'] )
+
     @override
-    def forward(self, x ):
-        # Masking the pad tokens
-        if x.ndim < 3:
-            x = x.unsqueeze(0)
-
-        # Get the positions, for this, we need to pass the tensor of indices.
-        xIndices = Range(x.shape[-2], device = self.device)
-        positionalEmbeddings = self.positionalEmbeddings(xIndices)
+    def forward(self, inputs, outputs ):
+        if inputs.dim() < 2 : # No Batching.
+            inputs = inputs.unsqueeze(0)
         
-        positionalEmbeddings = positionalEmbeddings.reshape(1, x.shape[-2], x.shape[-1]).expand(x.shape)
+        # Prepare the positional embeddings.
+        inputIndices = Range(inputs.shape[-2], device = self.device)
+        positionalInformation = self.EncoderPositionalEmbeddings(inputIndices)
         
-        # Add the two to get the final embedding.
-        x = x + positionalEmbeddings
+        # Expand the positional embeddings for the entire batch.
+        positionalInformation = positionalInformation.reshape(positionalInformation.shape[0], 1, positionalInformation.shape[1]).expand(-1, inputs.shape[1], -1)
+        # Get embeddings from Embedding Lookup for Encoder.
+        inputs = self.EncoderEmbeddings(inputs)
+        
+        # Add the positional encodings to the embeddings.
+        inputs = inputs + positionalInformation
 
-        # Decoder Stack
-        for decoder in self.decoderStack:
-            x = decoder(x)
+        # Passing all the values to the decoder stack.
+        encoderOutput = self.encoderStack(inputs)
 
-        # Final Layer
-        x = self.finalLayer(x)
+        # Preparing Decoder Input.
+        if outputs.dim() < 2 : # No Batching
+            outputs = outputs.unsqueeze(0)
+        
+        # Prepare the positional embeddings for the outputs.
+        outputIndices = Range(outputs.shape[-2], device = self.device)
+        positionalInformation = self.DecoderPositionalEmbeddings(outputIndices)
+        positionalInformation = positionalInformation.reshape(positionalInformation.shape[0], 1, positionalInformation.shape[1]).expand(-1, outputs.shape[1], -1)
 
-        return x
+        outputs = self.DecoderEmbeddings(outputs)
 
-    def getProbabilityDistribution(self, concatenatedContext : Tensor, dim : int = 1) -> Tensor:
-        with NoGrad():
-            output = self.forward(concatenatedContext)[-1]
+        # Add the positinal information to the embeddings.
+        outputs = outputs + positionalInformation
 
-        finalTokenDistribution = output[-1, :]
-        finalTokenDistribution = NeuralNetwork.Softmax(dim=dim)(finalTokenDistribution)
+        # Passing the outputs through the decoders.
+        for decoder in self.decoderStack :
+            outputs = decoder(outputs, encoderOutput)
+        
+        # Apply final linear layer to get vocab distribution.
+        output = self.classificationLayer(outputs)
 
-        return finalTokenDistribution
+        return output
